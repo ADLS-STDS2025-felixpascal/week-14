@@ -1,8 +1,99 @@
-# 
-
 ---
 title: "Solution for Week 14: Movement Analysis II"
 format: html
 ---
 
-# 
+## Introduction
+
+In this task, the goal was to revisit the model from Week 12 and enhance it using contextual information derived from OpenStreetMap. Due to excessive runtimes in earlier trials (e.g., full model taking over 30 minutes), the dataset was intentionally reduced to a manageable size to make model training feasible. This decision makes direct performance comparisons with last week's full pipeline less meaningful, but still demonstrates how context information can be integrated effectively.
+
+## Load Packages and Data
+
+```{r}
+library(sf)
+library(dplyr)
+library(randomForest)
+
+```
+
+
+```{r}
+# Load OSM road data
+highway <- read_sf("data/osm.gpkg", "highway")
+
+```
+
+```{r}
+# Load a reduced sample of GPS tracks for runtime efficiency
+training <- read_sf("data/tracks_1.gpkg", layer = "training") |>
+  slice_sample(n = 1000) |> 
+  mutate(data = "training")
+
+```
+
+```{r}
+# Join each GPS point to its nearest road segment
+nearest_highway_idx <- st_nearest_feature(training, highway)
+training <- bind_cols(
+  training,
+  highway[nearest_highway_idx, c("highway", "cycleway")] |> st_drop_geometry()
+)
+
+```
+
+```{r}
+# Add binary context variables
+training$on_bike_infra <- ifelse(training$cycleway == TRUE, 1, 0)
+training$is_major_road <- ifelse(training$highway %in% c("primary", "secondary", "motorway"), 1, 0)
+
+```
+
+```{r}
+# Calculate speed and step length per track
+training <- training |>
+  arrange(track_id, datetime) |>
+  group_by(track_id) |>
+  mutate(
+    steplength = as.numeric(st_distance(lead(geom), geom, by_element = TRUE)),
+    timelag = as.numeric(difftime(lead(datetime), datetime, units = "secs")),
+    speed = steplength / timelag
+  ) |>
+  ungroup()
+
+```
+
+```{r}
+# Aggregate features per track
+tracks_training <- training |>
+  st_drop_geometry() |>
+  group_by(track_id, mode) |>
+  summarise(
+    speed_mean = mean(speed, na.rm = TRUE),
+    is_major_road = mean(is_major_road, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  filter(if_all(where(is.numeric), is.finite)) |>
+  mutate(mode = factor(mode))
+
+
+```
+
+```{r}
+# Train a minimal Random Forest model
+rf_model <- randomForest(mode ~ ., data = tracks_training, ntree = 50)
+
+```
+
+```{r}
+# Show model performance summary
+print(rf_model)
+
+# Show feature importance
+importance(rf_model)
+
+```
+## Discussion
+
+The model achieved a ~30% out-of-bag error using only speed_mean and a binary is_major_road context feature. While the classification performance is not perfect, this minimal setup demonstrates the feasibility of integrating environmental context information.
+
+Due to runtime limitations, a reduced dataset was used. The resulting model cannot be fairly compared to the full model from Week 12, which used a larger dataset and more derived features such as sinuosity and acceleration. However, the current solution fulfills the goal of adding context and re-training a working model.
